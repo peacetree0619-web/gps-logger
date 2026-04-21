@@ -18,8 +18,10 @@
         button:disabled { background: #ccc !important; }
         .filter-group { display: flex; align-items: center; gap: 5px; font-size: 12px; flex-wrap: wrap; }
         input[type="date"] { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
-        .sub-btns { display: flex; gap: 5px; margin-top: 10px; }
-        .sub-btns button { background: #eee; color: #333; padding: 8px; font-size: 11px; }
+        .sub-btns { display: flex; gap: 5px; margin-top: 10px; flex-wrap: wrap; }
+        .sub-btns button { background: #eee; color: #333; padding: 8px; font-size: 11px; flex: none; width: calc(33% - 4px); }
+        /* GPXボタンを目立たせる */
+        #downloadGpxBtn { background: #007bff; color: white; width: 100%; margin-top: 5px; font-size: 12px; }
     </style>
 </head>
 <body>
@@ -43,17 +45,19 @@
     
     <div class="sub-btns">
         <button id="filterBtn">🔍 期間表示</button>
-        <button id="allBtn">🌐 全期間表示</button>
-        <button id="clearMapBtn">🧹 地図クリア</button>
+        <button id="allBtn">🌐 全表示</button>
+        <button id="clearMapBtn">🧹 クリア</button>
+        <button id="downloadGpxBtn">💾 GPXを出力</button>
     </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
-    // --- 1. データベース(IndexedDB)の準備 ---
+    // --- 1. データベース設定 ---
     let db;
     const dbName = "GPS_Walking_DB";
     const request = indexedDB.open(dbName, 1);
+    let currentDisplayedData = []; // 現在地図に出しているデータを保持用
 
     request.onupgradeneeded = (e) => {
         const store = e.target.result.createObjectStore("logs", { keyPath: "t" });
@@ -65,10 +69,10 @@
         updateDataCount();
     };
 
-    // --- 2. 地図の初期設定 ---
+    // --- 2. 地図設定 ---
     const map = L.map('map').setView([35.6812, 139.7671], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors'
+        attribution: '© OpenStreetMap'
     }).addTo(map);
 
     let watchId = null;
@@ -80,10 +84,9 @@
     const stopBtn = document.getElementById('stopBtn');
     const statusTxt = document.getElementById('status');
 
-    // --- 3. 記録ロジック ---
+    // --- 3. 記録 ---
     startBtn.onclick = () => {
-        if (!navigator.geolocation) return alert("GPSが使えません");
-
+        if (!navigator.geolocation) return alert("GPS不可");
         startBtn.disabled = true;
         stopBtn.disabled = false;
         currentSessionPoints = [];
@@ -94,22 +97,17 @@
             (pos) => {
                 const now = new Date();
                 const logEntry = {
-                    t: now.getTime(), // ID(タイムスタンプ)
-                    date: now.toISOString().split('T')[0], // YYYY-MM-DD
+                    t: now.getTime(),
+                    date: now.toISOString().split('T')[0],
                     lat: pos.coords.latitude,
                     lng: pos.coords.longitude
                 };
-
-                // DBへ保存
                 const tx = db.transaction("logs", "readwrite");
                 tx.objectStore("logs").add(logEntry);
-
-                // 地図表示を更新
                 const latlng = [logEntry.lat, logEntry.lng];
                 currentSessionPoints.push(latlng);
                 currentPolyline.setLatLngs(currentSessionPoints);
                 map.panTo(latlng);
-
                 statusTxt.innerText = "🔴 記録中...";
                 updateDataCount();
             },
@@ -123,10 +121,10 @@
         startBtn.disabled = false;
         stopBtn.disabled = true;
         statusTxt.innerText = "📡 停止中";
-        alert("記録を終了し、データを保存しました。");
+        alert("保存完了");
     };
 
-    // --- 4. 過去データの表示ロジック ---
+    // --- 4. 表示 & GPX生成 ---
     function showHistory(filterFn = null) {
         historyLayer.clearLayers();
         const tx = db.transaction("logs", "readonly");
@@ -134,47 +132,71 @@
 
         request.onsuccess = (e) => {
             const allData = e.target.result;
-            const data = filterFn ? allData.filter(filterFn) : allData;
+            currentDisplayedData = filterFn ? allData.filter(filterFn) : allData;
 
-            if (data.length === 0) return alert("データが見つかりませんでした");
+            if (currentDisplayedData.length === 0) return alert("データなし");
 
             let segments = [];
             let currentSeg = [];
 
-            // 10分以上空いたら別の線として描画する
-            data.forEach((p, i) => {
-                if (i > 0 && p.t - data[i-1].t > 600000) {
+            currentDisplayedData.forEach((p, i) => {
+                if (i > 0 && p.t - currentDisplayedData[i-1].t > 600000) {
                     segments.push(currentSeg);
                     currentSeg = [];
                 }
                 currentSeg.push([p.lat, p.lng]);
             });
             segments.push(currentSeg);
-
             segments.forEach(seg => {
                 L.polyline(seg, {color: 'blue', weight: 3, opacity: 0.6}).addTo(historyLayer);
             });
-
-            // 全体が見えるようにズーム
-            const bounds = L.polyline(data.map(p => [p.lat, p.lng])).getBounds();
+            const bounds = L.polyline(currentDisplayedData.map(p => [p.lat, p.lng])).getBounds();
             map.fitBounds(bounds);
         };
     }
 
-    document.getElementById('allBtn').onclick = () => showHistory();
+    // GPXダウンロード機能
+    document.getElementById('downloadGpxBtn').onclick = () => {
+        if (currentDisplayedData.length === 0) return alert("出力するデータが地図に表示されていません。「全表示」などを押してください。");
 
+        let gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MyGPSLogger" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>GPS Log ${new Date().toLocaleDateString()}</name>
+    <trkseg>`;
+
+        currentDisplayedData.forEach(p => {
+            const time = new Date(p.t).toISOString();
+            gpx += `
+      <trkpt lat="${p.lat}" lon="${p.lng}"><time>${time}</time></trkpt>`;
+        });
+
+        gpx += `
+    </trkseg>
+  </trk>
+</gpx>`;
+
+        const blob = new Blob([gpx], { type: 'application/gpx+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `log_${new Date().getTime()}.gpx`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    document.getElementById('allBtn').onclick = () => showHistory();
     document.getElementById('filterBtn').onclick = () => {
         const start = document.getElementById('startDate').value;
         const end = document.getElementById('endDate').value;
-        if (!start || !end) return alert("開始日と終了日を選択してください");
+        if (!start || !end) return alert("日付を選択してください");
         showHistory(p => p.date >= start && p.date <= end);
     };
-
     document.getElementById('clearMapBtn').onclick = () => {
         historyLayer.clearLayers();
         currentPolyline.setLatLngs([]);
+        currentDisplayedData = [];
     };
-
     function updateDataCount() {
         const tx = db.transaction("logs", "readonly");
         tx.objectStore("logs").count().onsuccess = (e) => {
